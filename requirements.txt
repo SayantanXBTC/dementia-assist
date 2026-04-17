@@ -1,0 +1,8 @@
+flask
+flask-cors
+deepface
+tensorflow
+opencv-python
+numpy
+requests
+hindsight-client
