@@ -1,28 +1,38 @@
 import type { Metadata } from 'next';
-import { Plus_Jakarta_Sans } from 'next/font/google';
-import { ToastProvider } from '@/components/Toast';
+import { Plus_Jakarta_Sans, Playfair_Display, DM_Sans } from 'next/font/google';
 import './globals.css';
 
 const plusJakarta = Plus_Jakarta_Sans({
-  subsets: ['latin'],
-  weight: ['300', '400', '500', '600', '700', '800'],
+  subsets:  ['latin'],
+  weight:   ['300', '400', '500', '600', '700', '800'],
   variable: '--font-plus-jakarta',
-  display: 'swap',
+  display:  'swap',
+});
+
+const playfair = Playfair_Display({
+  subsets:  ['latin'],
+  weight:   ['400', '500', '600', '700', '800', '900'],
+  style:    ['normal', 'italic'],
+  variable: '--font-playfair',
+  display:  'swap',
+});
+
+const dmSans = DM_Sans({
+  subsets:  ['latin'],
+  weight:   ['300', '400', '500', '600', '700'],
+  variable: '--font-dm-sans',
+  display:  'swap',
 });
 
 export const metadata: Metadata = {
-  title: 'Dementia Assist',
-  description: 'AI-powered face recognition and memory assistant for dementia care',
+  title: 'RecallPal — Remember What Matters',
+  description: 'AI-powered memory companion for dementia care',
 };
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
-    <html lang="en" className={plusJakarta.variable}>
-      <body className="font-sans">
-        <ToastProvider>
-          {children}
-        </ToastProvider>
-      </body>
+    <html lang="en" className={`${plusJakarta.variable} ${playfair.variable} ${dmSans.variable}`}>
+      <body>{children}</body>
     </html>
   );
 }

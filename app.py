@@ -337,6 +337,8 @@ def recognize():
         display_name = recalled.get("name", matched_name) if recalled else matched_name.title()
         suggestion = generate_suggestion(display_name, recalled)
 
+        logger.info("Fetched memory for '%s': %s", display_name, memory_payload)
+
         return jsonify(
             {
                 "status": "recognized",
@@ -435,7 +437,13 @@ def add_person():
             )
 
         # Only persist memory after face DB confirms success
-        memory_manager.store_person(name, relation, notes, age=age, likes=likes)
+        payload = {
+            "relation": relation,
+            "notes": notes,
+            "age": age,
+            "likes": likes
+        }
+        memory_manager.store_person(name_key, payload)
 
         return jsonify(
             {
@@ -534,7 +542,7 @@ def list_people():
         people_list = []
 
         for name in names:
-            recalled = memory_manager.recall_person(name)
+            recalled = memory_manager.recall_person(name, fast_mode=True)
             embeddings_count = len(face_engine.database.get(name, []))
             people_list.append(
                 {
@@ -555,6 +563,58 @@ def list_people():
             jsonify({"status": "error", "message": "Failed to retrieve people list"}),
             500,
         )
+
+
+@app.route("/api/update-person", methods=["POST"])
+def update_person():
+    """
+    Update a person's memory details (relation, notes, age, likes).
+    Does NOT modify face embeddings.
+
+    Request body (JSON)
+    -------------------
+    name     : str
+    relation : str
+    notes    : str
+    age      : int | null
+    likes    : list[str]
+
+    Response body (JSON)
+    --------------------
+    status   "success" | "error"
+    message  str
+    """
+    try:
+        payload = request.get_json(silent=True) or {}
+        name: str = (payload.get("name") or "").strip()
+        if not name:
+            return jsonify({"status": "error", "message": "Name is required"}), 400
+
+        name_key = name.lower()
+        if name_key not in face_engine.database:
+            return (
+                jsonify({"status": "error", "message": f"'{name}' not found in face database"}),
+                404,
+            )
+
+        relation: str = payload.get("relation") or ""
+        notes:    str = payload.get("notes") or ""
+        age_raw        = payload.get("age")
+        likes: list    = payload.get("likes") or []
+
+        try:
+            age = int(age_raw) if age_raw not in (None, "", "null") else None
+        except (ValueError, TypeError):
+            age = None
+
+        memory_manager.update_person(name_key, relation, notes, age=age, likes=likes)
+        logger.info("Updated memory for '%s'", name_key)
+
+        return jsonify({"status": "success", "message": f"{name.title()} updated successfully."})
+
+    except Exception:
+        logger.error("Error in POST /api/update-person:\n%s", traceback.format_exc())
+        return jsonify({"status": "error", "message": "Update failed"}), 500
 
 
 # ---------------------------------------------------------------------------

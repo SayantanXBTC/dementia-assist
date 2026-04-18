@@ -1,0 +1,11 @@
+{
+  "auth": {
+    "providers": {
+      "emailPassword": true,
+      "googleSignIn": {
+        "oAuthBrandDisplayName": "RecallPal",
+        "supportEmail": "bhattacharjeesayantan86@gmail.com"
+      }
+    }
+  }
+}

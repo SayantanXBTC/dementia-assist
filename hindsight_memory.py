@@ -24,6 +24,7 @@ import json
 import logging
 import os
 import re
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
@@ -122,8 +123,11 @@ class MemoryManager:
         if not api_key:
             raise ValueError("HINDSIGHT_API_KEY must be set to use cloud memory.")
 
+        self.api_url = api_url
+        self.api_key = api_key
         self.bank_id = bank_id
-        self.client  = Hindsight(base_url=api_url, api_key=api_key)
+        self._cache = {}
+        self._last_seen_cache = {}
         logger.info(
             "MemoryManager initialised (cloud). bank_id='%s', api_url='%s'.",
             bank_id, api_url,
@@ -151,26 +155,23 @@ class MemoryManager:
         already_existed: list[str] = []
 
         for name, data in PREDEFINED_PEOPLE.items():
-            existing = self.recall_person(name)
-            if existing:
-                already_existed.append(name)
-                logger.debug("seed_initial_data: '%s' already in Hindsight — skipping.", name)
-                continue
-
+            name_key = name.lower()
+            # Always (re)write structured data using store_person() so that
+            # recall_person(lowercase_key) reliably finds and parses all fields.
+            # The Hindsight `retain` call is idempotent-ish; adding the structured
+            # entry alongside any old freetext ensures the structured one wins.
             try:
-                self.client.retain(
-                    bank_id=self.bank_id,
-                    content=data["text"],
-                    tags=[name.lower(), "person", data["relation"].lower()],
-                )
-                now = _now_iso()
-                self.client.retain(
-                    bank_id=self.bank_id,
-                    content=f"{name} was seen on {now}",
-                    tags=[name.lower(), "last_seen"],
+                self.store_person(
+                    name=name_key,
+                    payload={
+                        "relation": data.get("relation", ""),
+                        "notes": data.get("notes", ""),
+                        "age": data.get("age"),
+                        "likes": data.get("likes") or [],
+                    }
                 )
                 seeded.append(name)
-                logger.info("seed_initial_data: seeded '%s' in Hindsight Cloud.", name)
+                logger.info("seed_initial_data: (re)seeded '%s' (structured) in Hindsight Cloud.", name)
             except Exception as exc:
                 logger.error("seed_initial_data: failed to seed '%s': %s", name, exc)
 
@@ -184,7 +185,61 @@ class MemoryManager:
     # Core operations
     # ------------------------------------------------------------------
 
-    def store_person(
+    def store_person(self, name: str, payload: dict) -> bool:
+        """
+        Store a fully structured memory about a new person in Hindsight Cloud.
+        """
+        now = _now_iso()
+        age = payload.get("age", "unknown")
+        relation = payload.get("relation", "unknown")
+        likes = payload.get("likes", [])
+        notes = payload.get("notes", "none")
+        likes_str = ", ".join(likes) if likes else "unknown"
+
+        content = (
+            f"New person added: {name}.\n"
+            f"Relationship: {relation}\n"
+            f"Age: {age}\n"
+            f"Interests/Likes: {likes_str}\n"
+            f"Additional Notes: {notes}\n"
+        )
+        
+        # Update cache immediately for 0-latency UI
+        self._cache[name.lower()] = (time.time(), {
+            "name": name.title(),
+            "age": payload.get("age"),
+            "relation": relation,
+            "likes": likes or [],
+            "notes": notes,
+            "last_seen": now
+        })
+        
+        try:
+            import asyncio
+            import threading
+            from hindsight_client import Hindsight
+            
+            async def _run():
+                client = Hindsight(base_url=self.api_url, api_key=self.api_key)
+                try:
+                    await client.aretain(
+                        bank_id=self.bank_id,
+                        content=content,
+                        tags=[name.lower(), "person", relation.lower()],
+                    )
+                finally:
+                    await client.aclose()
+            
+            # Run in background to prevent HTTP lag
+            threading.Thread(target=lambda: asyncio.run(_run()), daemon=True).start()
+            logger.info("Backgrounding Hindsight store for '%s'.", name)
+            
+            return True
+        except Exception as exc:
+            logger.error("Failed to sequence memory for '%s': %s", name, exc)
+            return False
+
+    def update_person(
         self,
         name:     str,
         relation: str,
@@ -193,75 +248,152 @@ class MemoryManager:
         likes:    Optional[list] = None,
     ) -> bool:
         """
-        Store a structured memory about a person in Hindsight Cloud.
-
-        The content string uses a parseable key: value format so that
-        ``recall_person()`` can reconstruct the structured dict reliably.
+        Update a structured memory about a person in Hindsight Cloud.
+        Specifically instructs the LLM that this is the absolute truth, 
+        overwriting any older facts. Uses background threading for zero latency.
         """
         now = _now_iso()
         likes_csv = ", ".join(likes) if likes else "unknown"
         age_str   = str(age) if age else "unknown"
 
         content = (
-            f"New person added: {name}. "
-            f"Relationship: {relation}. "
-            f"Age: {age_str}. "
-            f"Likes: {likes_csv}. "
-            f"Notes: {notes}. "
-            f"First seen on: {now}."
+            f"UPDATE EFFECTIVE NOW ({now}): The absolute true profile for {name} is: "
+            f"Relationship: {relation}. Age: {age_str}. Likes: {likes_csv}. Notes: {notes}."
+            f"Ignore all previous relationships and age data."
         )
+        
+        # Instantly apply facts to cache so frontend can fetch immediately
+        self._cache[name.lower()] = (time.time(), {
+            "name": name.title(),
+            "age": age,
+            "relation": relation,
+            "likes": likes or [],
+            "notes": notes,
+            "last_seen": now
+        })
+        
         try:
-            self.client.retain(
-                bank_id=self.bank_id,
-                content=content,
-                tags=[name.lower(), "person", relation.lower()],
-            )
-            self.client.retain(
-                bank_id=self.bank_id,
-                content=f"{name} was seen on {now}",
-                tags=[name.lower(), "last_seen"],
-            )
-            logger.info("Stored memory for '%s' in Hindsight Cloud.", name)
+            import asyncio
+            import threading
+            from hindsight_client import Hindsight
+            
+            async def _run():
+                client = Hindsight(base_url=self.api_url, api_key=self.api_key)
+                try:
+                    await client.aretain(
+                        bank_id=self.bank_id,
+                        content=content,
+                        tags=[name.lower(), "person", relation.lower()],
+                    )
+                finally:
+                    await client.aclose()
+            
+            # Push network call into background
+            threading.Thread(target=lambda: asyncio.run(_run()), daemon=True).start()
+            logger.info("Backgrounding Hindsight update for '%s'.", name)
+            
             return True
         except Exception as exc:
-            logger.error("Failed to store memory for '%s': %s", name, exc)
+            logger.error("Failed to sequence update for '%s': %s", name, exc)
             return False
 
-    def recall_person(self, name: str) -> Optional[dict]:
+    def recall_person(self, name: str, fast_mode: bool = False) -> Optional[dict]:
         """
-        Retrieve memories about a specific person from Hindsight Cloud.
+        Retrieve up-to-date memories about a person.
+        Returns the constantly maintained in-memory cache directly if available.
+        This ensures 0-latency responses for the 1-second camera loop without
+        causing 30-second blocking timeouts.
+        """
+        now = time.time()
+        cached_ts, cached_data = self._cache.get(name.lower(), (0, None))
+        
+        # If cache exists, always return it. The cache is manually updated
+        # by update_person and store_person, so it is always the source of truth.
+        if cached_data is not None:
+            return cached_data
 
-        Returns a dict with keys: name, age, relation, likes, notes, last_seen.
-        """
-        query = f"What do I know about {name}?"
+        # If missing and in fast mode, return simple scaffold
+        if fast_mode:
+            return {"name": name.title(), "relation": "", "notes": "", "age": None, "likes": [], "last_seen": ""}
+
+        query = f"Extract the profile for {name}. Include their age, relation, likes, notes, and when they were last seen."
         try:
-            results = self.client.recall(
-                bank_id=self.bank_id,
-                query=query,
-                tags=[name.lower()],
-            )
+            import asyncio
+            from hindsight_client import Hindsight
+            
+            async def _run():
+                client = Hindsight(base_url=self.api_url, api_key=self.api_key)
+                try:
+                    schema = {
+                        "type": "object",
+                        "properties": {
+                            "name": {"type": "string"},
+                            "age": {"type": "integer"},
+                            "relation": {"type": "string"},
+                            "likes": {"type": "array", "items": {"type": "string"}},
+                            "notes": {"type": "string"},
+                            "last_seen": {"type": "string"}
+                        }
+                    }
+                    return await client.areflect(
+                        bank_id=self.bank_id,
+                        query=query,
+                        tags=[name.lower()],
+                        response_schema=schema,
+                    )
+                finally:
+                    await client.aclose()
+                    
+            res = asyncio.run(_run())
+            
+            # extract structured output format
+            struct = getattr(res, "structured_output", None) or {}
+            
+            # if model returns no structural hits, rollback to empty fallback.
+            if not struct and not getattr(res, "text", ""):
+                return None
+                
+            parsed = {
+                "name": struct.get("name") or name,
+                "age": struct.get("age"),
+                "relation": struct.get("relation", ""),
+                "likes": struct.get("likes", []),
+                "notes": struct.get("notes", ""),
+                "last_seen": struct.get("last_seen", ""),
+            }
+            
+            self._cache[name.lower()] = (now, parsed)
+            logger.info("Reflected synthesized memory for '%s'.", name)
+            return parsed
+            
         except Exception as exc:
             logger.error("Failed to recall memory for '%s': %s", name, exc)
-            return None
-
-        if not results:
-            logger.info("No memories found for '%s'.", name)
-            return None
-
-        raw    = results[0] if isinstance(results, list) else results
-        parsed = self._parse_memory_content(raw, name)
-        logger.info("Recalled memory for '%s'.", name)
-        return parsed
+            return cached_data
 
     def update_last_seen(self, name: str) -> bool:
-        """Record a timestamped "last seen" event for a person."""
+        """Record a timestamped "last seen" event, throttled to 2 minutes per person."""
+        now_ts = time.time()
+        last = self._last_seen_cache.get(name.lower(), 0)
+        if now_ts - last < 120:
+            return True
+            
+        self._last_seen_cache[name.lower()] = now_ts
         content = f"{name} was seen on {_now_iso()}"
         try:
-            self.client.retain(
-                bank_id=self.bank_id,
-                content=content,
-                tags=[name.lower(), "last_seen"],
-            )
+            import asyncio
+            from hindsight_client import Hindsight
+            async def _run():
+                client = Hindsight(base_url=self.api_url, api_key=self.api_key)
+                try:
+                    await client.aretain(
+                        bank_id=self.bank_id,
+                        content=content,
+                        tags=[name.lower(), "last_seen"],
+                    )
+                finally:
+                    await client.aclose()
+            
+            asyncio.run(_run())
             logger.info("Updated last-seen for '%s'.", name)
             return True
         except Exception as exc:
@@ -271,10 +403,19 @@ class MemoryManager:
     def get_all_people(self) -> list[dict]:
         """Retrieve a summary of all known people from Hindsight Cloud."""
         try:
-            results = self.client.recall(
-                bank_id=self.bank_id,
-                query="List all people I know",
-            )
+            import asyncio
+            from hindsight_client import Hindsight
+            async def _run():
+                client = Hindsight(base_url=self.api_url, api_key=self.api_key)
+                try:
+                    return await client.arecall(
+                        bank_id=self.bank_id,
+                        query="List all people I know",
+                    )
+                finally:
+                    await client.aclose()
+            
+            results = asyncio.run(_run())
         except Exception as exc:
             logger.error("Failed to retrieve all people: %s", exc)
             return []
@@ -294,26 +435,37 @@ class MemoryManager:
     def delete_person(self, name: str) -> bool:
         """Attempt to clear all memories tagged with a person's name."""
         try:
-            results = self.client.recall(
-                bank_id=self.bank_id,
-                query=f"Everything about {name}",
-                tags=[name.lower()],
-            )
-            logger.info(
-                "Found %d memories tagged '%s'. Deletion depends on API support.",
-                len(results) if isinstance(results, list) else 0,
-                name.lower(),
-            )
-            if hasattr(self.client, "forget"):
-                self.client.forget(bank_id=self.bank_id, tags=[name.lower()])
+            import asyncio
+            from hindsight_client import Hindsight
+            async def _run():
+                client = Hindsight(base_url=self.api_url, api_key=self.api_key)
+                try:
+                    res = await client.arecall(
+                        bank_id=self.bank_id,
+                        query=f"Everything about {name}",
+                        tags=[name.lower()],
+                    )
+                    
+                    if hasattr(client, "forget"):
+                        client.forget(bank_id=self.bank_id, tags=[name.lower()])
+                        return len(res) if isinstance(res, list) else (res.results if hasattr(res, "results") else 0), True
+                    return len(res) if isinstance(res, list) else (res.results if hasattr(res, "results") else 0), False
+                finally:
+                    await client.aclose()
+            
+            count_found, did_forget = asyncio.run(_run())
+            logger.info("Found %d memories tagged '%s'. Deletion depends on API support.", count_found, name.lower())
+            
+            if did_forget:
                 logger.info("Deleted memories for '%s' via client.forget().", name)
                 return True
-            logger.warning(
-                "hindsight_client has no delete method. "
-                "Remove memories for '%s' manually via the dashboard.",
-                name,
-            )
-            return False
+            else:
+                logger.warning(
+                    "hindsight_client has no delete method. "
+                    "Remove memories for '%s' manually via the dashboard.",
+                    name,
+                )
+                return False
         except Exception as exc:
             logger.error("Failed to delete memories for '%s': %s", name, exc)
             return False
@@ -335,7 +487,7 @@ class MemoryManager:
         if isinstance(raw, dict):
             content = raw.get("content", "") or str(raw)
         else:
-            content = str(raw)
+            content = getattr(raw, "text", str(raw))
 
         result: dict = {
             "name":       name,
@@ -488,7 +640,9 @@ class LocalMemoryManager:
 
         for name, data in PREDEFINED_PEOPLE.items():
             key = name.lower()
-            if key in self._store["people"]:
+            existing_entry = self._store["people"].get(key)
+            # Re-seed if missing or if structured fields (relation/age) are absent
+            if existing_entry and existing_entry.get("relation") and existing_entry.get("age") is not None:
                 already_existed.append(name)
                 logger.debug("seed_initial_data: '%s' already in local store — skipping.", name)
                 continue
@@ -500,9 +654,9 @@ class LocalMemoryManager:
                 "relation":   data.get("relation", ""),
                 "likes":      data.get("likes", []),
                 "notes":      data.get("notes", ""),
-                "last_seen":  now,
-                "first_seen": now,
-                "added":      now,
+                "last_seen":  existing_entry.get("last_seen", now) if existing_entry else now,
+                "first_seen": existing_entry.get("first_seen", now) if existing_entry else now,
+                "added":      existing_entry.get("added",      now) if existing_entry else now,
             }
             seeded.append(name)
 

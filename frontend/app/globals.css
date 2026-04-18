@@ -2,6 +2,51 @@
 @tailwind components;
 @tailwind utilities;
 
+/* ─── Landing page base styles ─────────────────────────────────────────────── */
+@layer base {
+  html { scroll-behavior: smooth; }
+
+  .font-serif   { font-family: var(--font-playfair), Georgia, serif; }
+  .font-dm-sans { font-family: var(--font-dm-sans), system-ui, sans-serif; }
+
+  /* ── Light mode (default) ── */
+  .marketing-root {
+    --m-bg:           #FAF6F1;
+    --m-bg-gradient:  linear-gradient(135deg, #FAF6F1 0%, #EEF4FB 45%, #FDF0E8 100%);
+    --m-surface:      rgba(255,255,255,0.72);
+    --m-surface-high: rgba(255,255,255,0.88);
+    --m-border:       rgba(255,255,255,0.70);
+    --m-text-dark:    #3A2F28;
+    --m-text-mid:     #6B5C52;
+    --m-text-soft:    #9A8C84;
+    --m-section-alt:  rgba(255,255,255,0.35);
+    background:       var(--m-bg-gradient);
+    color:            var(--m-text-dark);
+    min-height:       100vh;
+    transition:       background 0.4s ease, color 0.3s ease;
+  }
+
+  /* ── Dark mode ── */
+  [data-theme="dark"] .marketing-root {
+    --m-bg:           #120E09;
+    --m-bg-gradient:  linear-gradient(135deg, #120E09 0%, #0D1520 45%, #16100A 100%);
+    --m-surface:      rgba(255,255,255,0.06);
+    --m-surface-high: rgba(255,255,255,0.10);
+    --m-border:       rgba(255,255,255,0.12);
+    --m-text-dark:    #F5EFE8;
+    --m-text-mid:     #C4B09A;
+    --m-text-soft:    #8A7D72;
+    --m-section-alt:  rgba(255,255,255,0.03);
+    background:       var(--m-bg-gradient);
+    color:            var(--m-text-dark);
+  }
+
+  /* Warm scrollbar */
+  .marketing-root::-webkit-scrollbar       { width: 4px; }
+  .marketing-root::-webkit-scrollbar-track { background: transparent; }
+  .marketing-root::-webkit-scrollbar-thumb { background: rgba(201,148,58,0.35); border-radius: 2px; }
+}
+
 @layer base {
   :root {
     --teal: #4fd1c5;

@@ -1,0 +1,54 @@
+'use client';
+
+import { useEffect, useState } from 'react';
+import { useRouter } from 'next/navigation';
+import { onAuthStateChanged } from 'firebase/auth';
+import { auth } from '@/lib/firebase';
+import { ToastProvider } from '@/components/Toast';
+import { ThemeProvider } from '@/lib/theme-context';
+
+function AppShell({ children }: { children: React.ReactNode }) {
+  const router = useRouter();
+  const [checking, setChecking] = useState(true);
+
+  useEffect(() => {
+    const unsub = onAuthStateChanged(auth, (user) => {
+      if (!user) router.replace('/login');
+      else setChecking(false);
+    });
+    return unsub;
+  }, [router]);
+
+  if (checking) {
+    return (
+      <div className="min-h-screen flex items-center justify-center marketing-root font-dm-sans">
+        <div className="flex flex-col items-center gap-4">
+          <span
+            className="font-serif text-2xl font-bold"
+            style={{ background: 'linear-gradient(135deg,#C9943A,#F0C97A)', WebkitBackgroundClip: 'text', WebkitTextFillColor: 'transparent', backgroundClip: 'text' }}
+          >
+            RecallPal
+          </span>
+          <div className="w-6 h-6 border-2 rounded-full animate-spin"
+               style={{ borderColor: 'rgba(201,148,58,0.25)', borderTopColor: '#C9943A' }} />
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <ToastProvider>
+      <div className="marketing-root font-dm-sans">
+        {children}
+      </div>
+    </ToastProvider>
+  );
+}
+
+export default function AppLayout({ children }: { children: React.ReactNode }) {
+  return (
+    <ThemeProvider>
+      <AppShell>{children}</AppShell>
+    </ThemeProvider>
+  );
+}
